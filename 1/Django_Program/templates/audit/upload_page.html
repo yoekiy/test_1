@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>申报文件智能审核系统 - 上传</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: Arial; padding:10px; background:none; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 20px; }
+    .row { margin: 12px 0; }
+    button { padding: 10px 14px; cursor: pointer; }
+    pre { background: #f7f7f7; padding: 12px; border-radius: 8px; overflow: auto; }
+    .muted { color: #666; font-size: 13px; }
+    .error { color: #b00020; }
+    .ok { color: #0a7a0a; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>申报文件智能审核系统</h2>
+    <div class="muted">支持：txt / png / jpg / jpeg / pdf / docx / xlsx</div>
+
+    <!-- ✅ 真正的左右两列 -->
+    <div style="display:flex; gap:24px; margin-top:16px; align-items:flex-start;">
+
+      <!-- 左侧：上传 + 结果 -->
+      <div style="flex:1; min-width:360px;">
+        <div class="row">
+          <input id="file" type="file" accept=".pdf,.docx,.xlsx,.txt,.png,.jpg,.jpeg" />
+        </div>
+
+        <div class="row">
+          <button id="btn">提交审核</button>
+          <span id="status" class="muted"></span>
+        </div>
+
+        <div class="row">
+          <div class="muted">返回结果：</div>
+          <pre id="output">{}</pre>
+        </div>
+      </div>
+
+      <!-- 右侧：实时推理 -->
+      <div style="flex:1; min-width:360px; border-left:1px solid #ddd; padding-left:16px;">
+        <h3>DeepSeek 实时推理过程</h3>
+        <pre id="streamBox" style="height:520px; overflow:auto; white-space:pre-wrap;"></pre>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    const btn = document.getElementById("btn");
+    const fileInput = document.getElementById("file");
+    const output = document.getElementById("output");
+    const status = document.getElementById("status");
+    const streamBox = document.getElementById("streamBox");
+
+    let streamAbortController = null;
+
+    async function startStreamWithFile(file) {
+      // 取消上一次流
+      if (streamAbortController) streamAbortController.abort();
+      streamAbortController = new AbortController();
+
+      streamBox.textContent = "";
+
+      const fd = new FormData();
+      fd.append("file", file);
+
+      try {
+        const resp = await fetch("/audit/stream/", {
+          method: "POST",          // ✅ 必须 POST 才能带文件
+          body: fd,
+          signal: streamAbortController.signal,
+          cache: "no-store",
+        });
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+
+        while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+
+  const chunk = decoder.decode(value, { stream: true });
+
+  // 1) 只取 SSE 的 data 行
+  //    SSE 格式是：data: xxxx\n\n
+  const lines = chunk.split(/\r?\n/);
+  for (const line of lines) {
+    if (line.startsWith("data:")) {
+      let payload = line.slice(5);     // 去掉 "data:"
+      if (payload.startsWith(" ")) payload = payload.slice(1);
+      streamBox.textContent += payload;
+    } else if (line === "") {
+      // SSE 消息结束通常是空行，给一点换行更可读
+      streamBox.textContent += "\n";
+    }
+  }
+
+  // 2) 可选：压缩连续空行（避免一堆空白）
+  streamBox.textContent = streamBox.textContent.replace(/\n{4,}/g, "\n\n\n");
+
+  streamBox.scrollTop = streamBox.scrollHeight;
+}
+
+      } catch (err) {
+        if (err.name !== "AbortError") {
+          streamBox.textContent += "\n[流式连接失败] " + err;
+        }
+      }
+    }
+
+    btn.addEventListener("click", async () => {
+      const f = fileInput.files[0];
+      if (!f) {
+        status.textContent = "请先选择文件";
+        status.className = "error";
+        return;
+      }
+
+      // ✅ 先启动流（带文件）
+      startStreamWithFile(f);
+
+      status.textContent = "上传并审核中，请稍候...";
+      status.className = "muted";
+      output.textContent = "{}";
+
+      const fd = new FormData();
+      fd.append("file", f);
+
+      try {
+        const resp = await fetch("/audit/upload/", { method: "POST", body: fd });
+        const text = await resp.text();
+
+        try {
+          const data = JSON.parse(text);
+          output.textContent = JSON.stringify(data, null, 2);
+
+          if (resp.ok && !data.error) {
+            status.textContent = "审核完成 ✅";
+            status.className = "ok";
+          } else {
+            status.textContent = "审核返回错误（见结果）";
+            status.className = "error";
+          }
+        } catch (e) {
+          output.textContent = text;
+          status.textContent = "返回不是 JSON（可能是 500/403 页面），请看输出";
+          status.className = "error";
+        }
+      } catch (err) {
+        status.textContent = "请求失败：" + err;
+        status.className = "error";
+      }
+    });
+  </script>
+</body>
+</html>
